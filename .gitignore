@@ -1,1 +1,8 @@
 .env
+
+# air auto-reload build output
+tmp/
+build-errors.log
+
+# compiled binaries
+bin/
