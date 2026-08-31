@@ -26,3 +26,12 @@ func New() *zap.Logger {
 	}
 	return Logger
 }
+
+// MaskPhone keeps logs useful for correlation without recording a complete
+// personal identifier.
+func MaskPhone(phone string) string {
+	if len(phone) <= 4 {
+		return "****"
+	}
+	return "***" + phone[len(phone)-4:]
+}

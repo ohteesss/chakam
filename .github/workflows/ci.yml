@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        run: test -z "$(gofmt -l $(find cmd internal -name '*.go' -type f))"
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race detector
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Build all commands
+        run: CGO_ENABLED=0 go build ./cmd/...
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: chakam:${{ github.sha }}
+      - name: Build migration image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: migrations
+          push: false
+          tags: chakam-migrations:${{ github.sha }}
+
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod
+          go-package: ./...
+
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: chakam
+          POSTGRES_USER: chakam
+          POSTGRES_PASSWORD: chakam-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chakam -d chakam"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build migration image
+        run: docker build --target migrations -t chakam-migrations:ci .
+      - name: Apply, roll back, and reapply schema
+        run: |
+          docker run --rm --network host chakam-migrations:ci -database=postgres://chakam:chakam-ci@127.0.0.1:5432/chakam?sslmode=disable up
+          docker run --rm --network host chakam-migrations:ci -database=postgres://chakam:chakam-ci@127.0.0.1:5432/chakam?sslmode=disable down 1
+          docker run --rm --network host chakam-migrations:ci -database=postgres://chakam:chakam-ci@127.0.0.1:5432/chakam?sslmode=disable up

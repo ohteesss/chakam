@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+api
+bin
+tmp
+coverage.out
+build-errors.log
+image.png
+readme.md

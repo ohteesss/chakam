@@ -1,0 +1,107 @@
+name: chakam
+
+x-common-environment: &common-environment
+  ENV: development
+  SERVER_ADDR: :8080
+  DATABASE_URL: postgres://chakam:${POSTGRES_PASSWORD:-chakam-local}@postgres:5432/chakam?sslmode=disable
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_TLS: "false"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: chakam
+      POSTGRES_USER: chakam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chakam-local}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chakam -d chakam"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: migrations
+    image: chakam-migrations:local
+    command:
+      - -database=postgres://chakam:${POSTGRES_PASSWORD:-chakam-local}@postgres:5432/chakam?sslmode=disable
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+    image: chakam:local
+    command: ["/app/api"]
+    environment:
+      <<: *common-environment
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-development-verify-token}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-development-app-secret}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-development-internal-api-key-0001}
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  worker:
+    image: chakam:local
+    command: ["/app/worker"]
+    environment:
+      <<: *common-environment
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-development-placeholder}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-development-access-token}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-development-phone-id}
+      WHATSAPP_BASE_URL: ${WHATSAPP_BASE_URL:-https://graph.facebook.com/v25.0}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

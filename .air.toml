@@ -1,0 +1,44 @@
+# Air config — watch .go files, rebuild, restart. Docs: github.com/air-verse/air
+# This is the "go run --watch" you're used to from `nest start --watch`.
+
+# All paths are relative to this root.
+root = "."
+tmp_dir = "tmp"   # air drops the compiled binary + logs here
+
+[build]
+  # How air rebuilds. We point at ./cmd/api (the API entrypoint), NOT the repo
+  # root, because main lives there. Output goes into tmp/ so it never collides
+  # with your `make build` output in bin/.
+  cmd = "go build -o ./tmp/main ./cmd/api"
+
+  # entrypoint is the command air runs after a successful build (array form, so
+  # extra args become extra elements). Replaces the old `bin` field.
+  entrypoint = ["./tmp/main"]
+
+  # If your app needs env vars on every restart, prefix them via env(1), e.g.:
+  #   entrypoint = ["env", "WHATSAPP_VERIFY_TOKEN=dev", "./tmp/main"]
+  # (air does not read .env files on its own.)
+
+  # Only react to Go source; ignore everything else.
+  include_ext = ["go"]
+  exclude_dir = ["tmp", "bin", "vendor", "testdata", ".git"]
+
+  # Don't restart on *_test.go changes — tests don't affect the running server,
+  # and rebuilding on every test edit is just noise.
+  exclude_regex = ["_test\\.go"]
+
+  # Wait this long after a change before rebuilding, so a burst of saves
+  # (or your editor's format-on-save) triggers one rebuild, not five.
+  delay = 1000  # milliseconds
+
+  # If a build fails, keep the last good binary running and show the error
+  # instead of crashing the loop.
+  stop_on_error = true
+  log = "build-errors.log"
+
+[misc]
+  # Wipe tmp/ when you quit air (Ctrl-C), so stale binaries don't linger.
+  clean_on_exit = true
+
+[screen]
+  clear_on_rebuild = true

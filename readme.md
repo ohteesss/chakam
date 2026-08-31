@@ -1,9 +1,8 @@
-```markdown
 # Chakam - WhatsApp Trust & Agreement Confirmation System
 
 A WhatsApp-based system that creates timestamped, structured records of transaction agreements between two parties in Nigeria. Think of it as a "digital handshake" powered by AI.
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## 🎯 What This Does
@@ -31,28 +30,28 @@ Chakam helps two parties confirm important transaction details on WhatsApp befor
 ### High-Level Overview
 
 ```
-User (WhatsApp) 
-    ↓
-Twilio WhatsApp API
-    ↓
-Go Application (Gin)
-    ↓
-Gemini LLM (Conversation Orchestrator)
-    ↓
-Business Services → PostgreSQL
+User ↔ Meta WhatsApp Cloud API
+              ↓ webhook
+        API service (Gin)
+              ↓ durable task
+            Redis
+              ↓
+       Worker service (Asynq)
+         ↙       ↓       ↘
+     Gemini  PostgreSQL  Meta Graph API
 ```
 
 ### Tech Stack
 
-- **Language**: Go 1.21+
+- **Language**: Go 1.25+
 - **HTTP Framework**: Gin
 - **ORM**: GORM
 - **Database**: PostgreSQL 15+
-- **AI/LLM**: Google Gemini (gemini-3.5)
-- **Messaging**: Twilio WhatsApp API
-- **Background Jobs**: Cron (MVP), Asynq (scale)
+- **AI/LLM**: Google Gemini
+- **Messaging**: Meta WhatsApp Cloud API
+- **Background Jobs**: Asynq plus an in-process scheduled-job runner
 - **Logging**: Zap
-- **Monitoring**: Prometheus + Sentry
+- **Operations**: Structured logs, liveness, and dependency readiness checks
 
 ### Architecture Style
 
@@ -69,11 +68,11 @@ Business Services → PostgreSQL
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- Go 1.25 or higher
 - PostgreSQL 15+
-- Twilio account with WhatsApp enabled
+- Meta developer account with a WhatsApp Business Account and registered phone number
 - Google AI Studio account (Gemini API)
-- Redis (optional, for caching)
+- Redis 7+ (required for the durable task queue)
 
 ### Installation
 
@@ -113,38 +112,21 @@ make migrate-up
 # Development mode
 make dev
 
-# Production mode
+# API and worker run as separate processes
 make run
+make run-worker
 ```
 
 ### Environment Variables
 
-```bash
-# Server
-PORT=8080
-ENV=development
+Copy [.env.example](.env.example) for the complete list. In production, the
+application validates all Meta, Gemini, internal API, database, and queue
+settings before starting. `DATABASE_URL` must use TLS and `INTERNAL_API_KEY`
+must contain at least 32 characters.
 
-# Database
-DATABASE_URL=postgres://user:pass@localhost:5432/chakam?sslmode=disable
-
-# Twilio
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_AUTH_TOKEN=your_auth_token_here
-TWILIO_PHONE_NUMBER=+14155238886
-
-# Gemini AI
-GEMINI_API_KEY=your_gemini_api_key_here
-
-# Redis (optional)
-REDIS_URL=redis://localhost:6379
-
-# Security
-JWT_SECRET=your_super_secret_jwt_key
-ADMIN_API_KEY=your_admin_api_key
-
-# Monitoring
-SENTRY_DSN=https://your_sentry_dsn@sentry.io/project
-```
+For least privilege, give the API only the webhook verify token, Meta app
+secret, and internal API key. Give the worker only the Meta access token, phone
+number ID, and Gemini key. Both processes need PostgreSQL and Redis settings.
 
 ## 📁 Project Structure
 
@@ -161,15 +143,17 @@ chakam/
 │   ├── domain/           # Domain models and business logic
 │   │   ├── user/
 │   │   ├── session/
-│   │   ├── request/
+│   │   ├── agreement/
 │   │   ├── response/
 │   │   └── audit/
 │   │
 │   ├── infrastructure/   # External integrations
 │   │   ├── database/
+│   │   │   └── migrations/
 │   │   ├── repository/
-│   │   ├── twilio/
-│   │   └── gemini/
+│   │   ├── whatsapp/
+│   │   ├── gemini/
+│   │   └── queue/
 │   │
 │   ├── interfaces/       # HTTP handlers and jobs
 │   │   ├── http/
@@ -180,19 +164,17 @@ chakam/
 │   │
 │   └── pkg/              # Shared utilities
 │
-├── migrations/           # Database migrations
-├── scripts/              # Helper scripts
-├── tests/                # Tests
-│
 ├── .env.example
-├── Makefile
+├── compose.yml
+├── Dockerfile
+├── makefile
 ├── go.mod
 └── README.md
 ```
 
 ## 🔄 How It Works
 
-### Creating a Trust Request
+### Creating an Agreement
 
 ```
 1. User A sends: "I want to create a deal"
@@ -217,7 +199,7 @@ chakam/
 
 9. User A: "08012345678"
 
-10. System creates request and sends to User B:
+10. System creates the agreement and sends to User B:
     "John wants to confirm a deal with you:
      Type: Sale
      Amount: ₦50,000
@@ -227,17 +209,15 @@ chakam/
 
 11. User B: "CONFIRM"
 
-12. Both parties receive confirmation with timestamp
+12. The responder receives a timestamped confirmation with the agreement reference
 ```
 
-### Request Lifecycle
+### Agreement Lifecycle
 
 ```
 PENDING → [Counterparty confirms] → CONFIRMED ✅
         → [Counterparty rejects]  → REJECTED ❌
-        → [48hr timeout]          → EXPIRED ⏱️
         → [Initiator cancels]     → CANCELLED 🚫
-        → [Dispute raised]        → DISPUTED ⚠️
 ```
 
 ## 🗄️ Database Schema
@@ -247,38 +227,24 @@ PENDING → [Counterparty confirms] → CONFIRMED ✅
 **users** - User profiles and verification status
 ```sql
 - id, public_id, phone_number
-- name, is_verified, verification_data
+- name, metadata
 - is_blocked, blocked_reason
+- created_at, updated_at
 ```
 
 **sessions** - Conversation state and history
 ```sql
 - id, user_id
 - conversation_history (JSONB)
-- last_message_at, expires_at
+- expires_at, created_at, updated_at
 ```
 
-**trust_requests** - Agreement records
+**agreements** - Agreement records
 ```sql
-- id, public_id
+- id
 - initiator_id, counterparty_id
-- request_type, amount_kobo, description
-- status, expires_at
-- confirmed_at, rejected_at, cancelled_at
-```
-
-**request_responses** - Confirmation/rejection records
-```sql
-- id, request_id, respondent_id
-- action (CONFIRMED/REJECTED)
-- notes, created_at
-```
-
-**audit_logs** - Complete audit trail
-```sql
-- id, event_type, event_data
-- user_id, request_id
-- ip_address, created_at
+- agreement_type, amount_minor, currency, description
+- status, created_at, updated_at
 ```
 
 ## 🤖 LLM Integration (Gemini)
@@ -295,71 +261,64 @@ PENDING → [Counterparty confirms] → CONFIRMED ✅
 
 The AI can call these functions:
 
-1. **create_trust_request** - Create new agreement
-2. **confirm_request** - Accept pending request
-3. **reject_request** - Decline pending request
-4. **get_request_status** - Check request status
-5. **cancel_request** - Cancel own request
+1. **create_agreement** - Create new agreement
+2. **confirm_agreement** - Accept pending agreement
+3. **get_my_agreements** - List a user's agreements
 
 ### Fallback Strategy
 
-If Gemini API fails or times out, the system falls back to rule-based responses for core commands:
-- CONFIRM
-- REJECT
-- HELP
-- START
+Queue jobs use bounded retries when Gemini or an outbound dependency fails.
+A rule-based conversational fallback is not implemented yet.
 
 ## 📡 API Endpoints
 
 ### Webhooks
 
 ```
-POST   /webhook/twilio/incoming   # Receive messages
-POST   /webhook/twilio/status     # Message delivery status
+GET    /webhook/whatsapp          # Meta webhook verification handshake
+POST   /webhook/whatsapp          # Receive messages and delivery-status events
 ```
 
-### Public API
+### Internal API
+
+These routes require `X-API-Key: <INTERNAL_API_KEY>`.
 
 ```
-GET    /api/v1/requests           # List user's requests
-GET    /api/v1/requests/:id       # Get request details
-PATCH  /api/v1/requests/:id/cancel # Cancel request
+GET    /api/v1/agreements         # List user's agreements
+GET    /api/v1/agreements/:id     # Get agreement details
+GET    /api/v1/users              # List users (page and page_size query parameters)
+POST   /send-message              # Queue an outbound text message
 ```
 
-### Admin API
+`GET /api/v1/users` defaults to `page=1` and `page_size=20`; `page_size` may
+be between 1 and 100. The response includes `users` plus `pagination` metadata
+(`page`, `page_size`, `total`, `total_pages`, and `has_next`).
+
+### Health
 
 ```
-POST   /api/admin/users/:id/block # Block user
-GET    /api/admin/audit-logs      # Query audit logs
-GET    /api/admin/stats           # Usage statistics
-```
-
-### Health & Metrics
-
-```
-GET    /health                    # Health check
-GET    /metrics                   # Prometheus metrics
+GET    /health                    # Backward-compatible liveness check
+GET    /livez                     # Process liveness
+GET    /readyz                    # PostgreSQL and Redis readiness
 ```
 
 ## 🔒 Security Features
 
 ### Request Security
-- ✅ Twilio signature verification
-- ✅ Rate limiting (10 req/min per IP)
-- ✅ Message deduplication (replay protection)
-- ✅ Admin endpoint authentication (JWT)
+- ✅ Meta webhook signature verification (`X-Hub-Signature-256`)
+- ✅ Redis task IDs deduplicate repeated Meta message IDs
+- ✅ Internal endpoints protected by a constant-time API-key check
+- ✅ Request-body and HTTP-header size limits
+- ✅ Production startup rejects missing or unsafe secrets
 
 ### Data Protection
 - ✅ Phone number masking in logs
-- ✅ Sensitive data encryption at rest
-- ✅ No storage of full message content
-- ✅ GDPR-compliant audit logging
+- ✅ Production PostgreSQL configuration requires transport encryption
+- ✅ Containers run as a non-root user with a read-only application filesystem
+- ⚠️ Conversation content is retained until session expiry; configure database encryption at rest with the hosting provider
 
-### Abuse Prevention
-- ✅ Daily request limits per user (20/day)
-- ✅ User blocking capability
-- ✅ Spam detection
-- ✅ Request expiry (48 hours)
+Rate limiting, immutable audit records, daily quotas, and spam controls remain
+application-level follow-up work.
 
 ## 🔍 Monitoring & Observability
 
@@ -368,25 +327,17 @@ GET    /metrics                   # Prometheus metrics
 Uses structured logging with Zap:
 
 ```go
-logger.Info("request created",
-    zap.String("request_id", req.PublicID),
-    zap.String("type", string(req.RequestType)),
+logger.Info("agreement created",
+    zap.String("agreement_id", agr.ID),
+    zap.String("type", agr.AgreementType),
 )
 ```
 
-### Metrics
-
-Key business metrics tracked:
-- Total requests created
-- Requests by status (pending, confirmed, rejected)
-- Confirmation rate
-- Average time to confirmation
-- Daily active users
-- LLM call latency and errors
-
-### Error Monitoring
-
-Integrated with Sentry for error tracking and alerting.
+Production application logs are JSON through Zap. They include process version,
+request/task identifiers, dependency failures, and job duration without full
+phone numbers or message bodies; SQL logging is disabled in production. Asynq
+emits its own worker lifecycle lines. Metrics and hosted error monitoring are
+not yet integrated.
 
 ## 🧪 Testing
 
@@ -397,31 +348,35 @@ make test
 # Run with coverage
 make test-coverage
 
-# Run integration tests
-make test-integration
+# Run with the race detector
+make test-race
 
-# Run linter
-make lint
+# Run formatting, vet, tests, and command builds
+make verify
 ```
 
 ## 📦 Deployment
 
-### Using Docker
+### Build the production image
 
 ```bash
 # Build image
-docker build -t trustconfirm:latest .
+docker build -t chakam:latest .
+docker build --target migrations -t chakam-migrations:latest .
 
 # Run container
-docker run -p 8080:8080 \
-  --env-file .env \
-  trustconfirm:latest
+docker run --rm -p 8080:8080 --env-file .env chakam:latest /app/api
+
+# Start the worker as a second deployment using the same immutable image
+docker run --rm --env-file .env chakam:latest /app/worker
 ```
 
-### Using Docker Compose
+### Local stack with Docker Compose
 
 ```bash
-docker-compose up -d
+docker compose up --build -d
+docker compose ps
+curl --fail http://localhost:8080/readyz
 ```
 
 ### Manual Deployment
@@ -430,30 +385,34 @@ docker-compose up -d
 # Build binary
 make build
 
-# Run migrations
-./scripts/migrate.sh up
+# Run versioned migrations before starting either process
+make migrate-up
 
 # Start application
-./bin/trustconfirm-api
+./bin/chakam-api
 
 # Start worker (separate process)
-./bin/trustconfirm-worker
+./bin/chakam-worker
 ```
 
+### Production rollout
+
+1. Build and scan one immutable image, then deploy that same digest for API and worker.
+2. Store all credentials in the platform's secret manager; do not deploy `.env`.
+3. Set `ENV=production`, use TLS for PostgreSQL, and enable `REDIS_TLS` when required by the provider.
+4. Run `migrate-up` as a one-off release job before rolling out either process.
+5. Route traffic only after `/readyz` returns 200. Use `/livez` for liveness.
+6. Give API at least 20 seconds and worker at least 30 seconds to handle `SIGTERM`.
+7. Back up PostgreSQL before a migration. Roll back the application image first; run a down migration only after confirming it is data-safe.
+
 ## 📈 Scaling Considerations
-
-### Current Capacity (Single Server)
-
-- ✅ 0-10,000 requests/day
-- ✅ ~1,000 concurrent users
-- ✅ Sub-3s response time (p95)
 
 ### Scaling Path
 
 **Phase 1: Vertical Scaling**
 - Bigger server (4 → 8 CPU)
 - Database connection pooling
-- Redis for session caching
+- Redis queue capacity and worker concurrency tuning
 
 **Phase 2: Horizontal Scaling**
 - Load balancer (Nginx/AWS ALB)

@@ -6,3 +6,8 @@ build-errors.log
 
 # compiled binaries
 bin/
+/api
+
+# test and tooling output
+coverage.out
+.golangci-cache/

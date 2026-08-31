@@ -7,5 +7,4 @@ func SetupAdminRoutes(router *gin.Engine) {
 		c.JSON(200, gin.H{"message": "OK"})
 	})
 
-	
 }
